@@ -35,6 +35,9 @@
   :prefix "elcord-"
   :group 'external)
 
+(defvar elcord-silent-mode 0
+  "When the value of this variable is greater than zero, no connection reattempts messages will be printed out to the Emacs messages window.")
+
 (defcustom elcord-client-id '"388338871475240965"
   "ID of elcord client (Application ID).
 See <https://discordapp.com/developers/applications/me>."
@@ -175,6 +178,10 @@ nil when elcord is not active.")
 On Windows, this script is used as a proxy for the Discord named pipe.
 Unused on other platforms.")
 
+(defun elcord--silent-mode-enabled ()
+  "Check whether the silent mode is enabled."
+  (> elcord-silent-mode 0))
+
 (defun elcord--make-process ()
   "Make the asynchronous process that communicates with Discord IPC."
   (cl-case system-type
@@ -288,10 +295,12 @@ Argument EVNT The available output from the process."
 
 (defun elcord--reconnect ()
   "Attempt to reconnect elcord."
-  (message "elcord: attempting reconnect..")
+  (unless (elcord--silent-mode-enabled)
+    (message "elcord: attempting reconnect.."))
   (when (elcord--connect)
     ;;Reconnected.
-    (message "elcord: connecting...")
+    (unless (elcord--silent-mode-enabled)
+      (message "elcord: connecting..."))
     (elcord--cancel-reconnect)))
 
 (defun elcord--start-reconnect ()
