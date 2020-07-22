@@ -307,7 +307,8 @@ Argument EVNT The available output from the process."
   "Connects to the Discord socket."
   (or elcord--sock
       (ignore-errors
-        (message "elcord: attempting reconnect..")
+	(unless (elcord--silent-mode-enabled)
+	  (message "elcord: attempting reconnect.."))
         (setq elcord--sock (elcord--make-process))
         (condition-case nil
             (elcord--send-packet 0 `(("v" . 1) ("client_id" . ,(elcord--resolve-client-id))))
