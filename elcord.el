@@ -5,10 +5,10 @@
 ;; Author: heatingdevice
 ;;      Wilfredo Velázquez-Rodríguez <zulu.inuoe@gmail.com>
 ;; Created: 21 Nov 2017
-;; Version: 1.0.0
+;; Version: 1.1.0
 ;; Keywords: games
 ;; Homepage: https://github.com/Mstrodl/elcord
-;; Package-Requires: ((emacs "25"))
+;; Package-Requires: ((emacs "25.1"))
 ;; License: MIT
 
 ;;; Commentary:
@@ -46,6 +46,11 @@ See <https://discordapp.com/developers/applications/me>."
                  (function :tag "Call the function with no args to get the ID."))
   :group 'elcord)
 
+(defcustom elcord-refresh-rate 15
+  "How often to send updates to Discord, in seconds."
+  :type 'integer
+  :group 'elcord)
+
 (defcustom elcord-mode-icon-alist '((c-mode . "c-mode_icon")
                                     (c++-mode . "cpp-mode_icon")
                                     (clojure-mode . "clojure-mode_icon")
@@ -71,13 +76,17 @@ See <https://discordapp.com/developers/applications/me>."
                                     (racket-mode . "racket-mode_icon")
                                     (ruby-mode . "ruby-mode_icon")
                                     (rust-mode . "rust-mode_icon")
-                                    (slime-repl-mode . "lisp-mode_icon")
-                                    (sly-mrepl-mode . "lisp-mode_icon")
+                                    (rustic-mode . "rust-mode_icon")
+                                    ("^slime-.*" . "lisp-mode_icon")
+                                    ("^sly-.*$" . "lisp-mode_icon")
                                     (php-mode . "php-mode_icon")
                                     (python-mode . "python-mode_icon"))
   "Mapping alist of major modes to icon names to have elcord use.
 Note, these icon names must be available as 'small_image' in Discord."
-  :type '(alist :key-type symbol :value-type string)
+  :type '(alist :key-type (choice (symbol :tag "Mode name")
+                                  (regexp :tag "Regex"))
+                :value-type (choice (string :tag "Icon name")
+                                    (function :tag "Mapping function")))
   :group 'elcord)
 
 (defcustom elcord-mode-text-alist '((c-mode . "C  ")
@@ -90,11 +99,15 @@ Note, these icon names must be available as 'small_image' in Discord."
                                     (lisp-mode . "Common-Lisp")
                                     (markdown-mode . "Markdown")
                                     (magit-mode . "It's Magit!")
+                                    ("mhtml-mode" . "HTML")
                                     (slime-repl-mode . "SLIME-REPL")
                                     (sly-mrepl-mode . "Sly-REPL")
                                     (php-mode "PHP"))
   "Mapping alist of major modes to text labels to have elcord use."
-  :type '(alist :key-type symbol :value-type string)
+  :type '(alist :key-type (choice (symbol :tag "Mode name")
+                                  (regexp :tag "Regex"))
+                :value-type (choice (string :tag "Text label")
+                                    (function :tag "Mapping function")))
   :group 'elcord)
 
 (defcustom elcord-display-elapsed 't
@@ -121,6 +134,18 @@ The mode text is the same found by `elcord-mode-text-alist'"
 (defcustom elcord-use-major-mode-as-main-icon 'nil
   "When enabled, the major mode determines the main icon, rather than it being the editor."
   :type 'boolean
+  :group 'elcord)
+
+(defcustom elcord-show-small-icon 't
+  "When enabled, show the small icon as well as the main icon."
+  :type 'boolean
+  :group 'elcord)
+
+(defcustom elcord-boring-buffers-regexp-list '("^ "
+                                               "\\\\*Messages\\\\*")
+  "A list of regexp's to match boring buffers.
+When visiting a boring buffer, it will not show in the elcord presence."
+  :type '(repeat regexp)
   :group 'elcord)
 
 ;;;###autoload
@@ -184,33 +209,34 @@ Unused on other platforms.")
 
 (defun elcord--make-process ()
   "Make the asynchronous process that communicates with Discord IPC."
-  (cl-case system-type
-    (windows-nt
-     (make-process
-      :name "*elcord-sock*"
-      :command (list
-                "PowerShell"
-                "-NoProfile"
-                "-ExecutionPolicy" "Bypass"
-                "-Command" elcord--stdpipe-path "." elcord--discord-ipc-pipe)
-      :connection-type 'pipe
-      :sentinel 'elcord--connection-sentinel
-      :filter 'elcord--connection-filter
-      :noquery nil))
-    (t
-     (make-network-process
-      :name "*elcord-sock*"
-      :remote (expand-file-name
-               elcord--discord-ipc-pipe
-               (file-name-as-directory
-                (or (getenv "XDG_RUNTIME_DIR")
-                    (getenv "TMPDIR")
-                    (getenv "TMP")
-                    (getenv "TEMP")
-                    "/tmp")))
-      :sentinel 'elcord--connection-sentinel
-      :filter 'elcord--connection-filter
-      :noquery nil))))
+  (let ((default-directory "~/"))
+    (cl-case system-type
+      (windows-nt
+       (make-process
+        :name "*elcord-sock*"
+        :command (list
+                  "PowerShell"
+                  "-NoProfile"
+                  "-ExecutionPolicy" "Bypass"
+                  "-Command" elcord--stdpipe-path "." elcord--discord-ipc-pipe)
+        :connection-type 'pipe
+        :sentinel 'elcord--connection-sentinel
+        :filter 'elcord--connection-filter
+        :noquery t))
+      (t
+       (make-network-process
+        :name "*elcord-sock*"
+        :remote (expand-file-name
+                 elcord--discord-ipc-pipe
+                 (file-name-as-directory
+                  (or (getenv "XDG_RUNTIME_DIR")
+                      (getenv "TMPDIR")
+                      (getenv "TMP")
+                      (getenv "TEMP")
+                      "/tmp")))
+        :sentinel 'elcord--connection-sentinel
+        :filter 'elcord--connection-filter
+        :noquery t)))))
 
 (defun elcord--enable ()
   "Called when variable ‘elcord-mode’ is enabled."
@@ -232,26 +258,30 @@ Unused on other platforms.")
   (elcord--cancel-updates)
   ;;Cancel any reconnect attempt
   (elcord--cancel-reconnect)
-  ;;Empty our presence
-  (elcord--empty-presence)
+
+  ;;If we're currently connected
+  (when elcord--sock
+    ;;Empty our presence
+    (elcord--empty-presence))
+
   (elcord--disconnect))
 
 (defun elcord--empty-presence ()
-  "Sends an empty presence for when elcord is disabled"
+  "Sends an empty presence for when elcord is disabled."
   (let* ((activity
           `(("details" . "Emacs"))) ;; For the time being we have to send a presence after we connect, we can't empty it :/
          (nonce (format-time-string "%s%N"))
          (presence
-           `(("cmd" . "SET_ACTIVITY")
-             ("args" . (("activity" . ,activity)
-                        ("pid" . ,(emacs-pid))))
-             ("nonce" . ,nonce))))
+          `(("cmd" . "SET_ACTIVITY")
+            ("args" . (("activity" . ,activity)
+                       ("pid" . ,(emacs-pid))))
+            ("nonce" . ,nonce))))
     (elcord--send-packet 1 presence)))
 
 (defun elcord--resolve-client-id ()
   "Evaluate `elcord-client-id' and return the client ID to use."
   (cl-typecase elcord-client-id
-    (nil
+    (null
      nil)
     (string
      elcord-client-id)
@@ -275,17 +305,16 @@ Argument EVNT The available output from the process."
 
 (defun elcord--connect ()
   "Connects to the Discord socket."
-  (condition-case nil
-      (progn
+  (or elcord--sock
+      (ignore-errors
+        (message "elcord: attempting reconnect..")
         (setq elcord--sock (elcord--make-process))
         (condition-case nil
             (elcord--send-packet 0 `(("v" . 1) ("client_id" . ,(elcord--resolve-client-id))))
           (error
            (delete-process elcord--sock)
            (setq elcord--sock nil)))
-        t)
-    (error
-     nil)))
+        elcord--sock)))
 
 (defun elcord--disconnect ()
   "Disconnect elcord."
@@ -299,13 +328,13 @@ Argument EVNT The available output from the process."
     (message "elcord: attempting reconnect.."))
   (when (elcord--connect)
     ;;Reconnected.
-    (unless (elcord--silent-mode-enabled)
+    (unless (or (elcord--silent-mode-enabled) elcord--update-presence-timer)
       (message "elcord: connecting..."))
     (elcord--cancel-reconnect)))
 
 (defun elcord--start-reconnect ()
   "Start attempting to reconnect."
-  (unless elcord--reconnect-timer
+  (unless (or elcord--sock elcord--reconnect-timer)
     (setq elcord--reconnect-timer (run-at-time 0 15 'elcord--reconnect))))
 
 (defun elcord--cancel-reconnect ()
@@ -319,9 +348,9 @@ Argument EVNT The available output from the process."
   (message "elcord: disconnected")
   ;;Stop updating presence for now
   (elcord--cancel-updates)
+  (setq elcord--sock nil)
   ;;Start trying to reconnect
-  (when
-      (bound-and-true-p elcord-mode)
+  (when elcord-mode
     (elcord--start-reconnect)))
 
 (defun elcord--send-packet (opcode obj)
@@ -342,6 +371,37 @@ Argument OBJ The data to send to the IPC server."
              (:data . ,jsonstr)))))
     (process-send-string elcord--sock packet)))
 
+(defun elcord--test-match-p (test mode)
+  "Test `MODE' against `TEST'.
+if `test' is a symbol, it is compared directly to `mode'.
+if `test' is a string, it is a regex to compare against the name of `mode'."
+  (cl-typecase test
+    (symbol (eq test mode))
+    (string (string-match-p test (symbol-name mode)))))
+
+(defun elcord--entry-value (entry mode)
+  "Test `ENTRY' against `MODE'.  Return the value of `ENTRY'.
+`entry' is a cons who's `car' is `elcord--test-match-p' with `mode''
+When `mode' matches, if the `cdr' of `entry' is a string, return that,
+otherwise if it is a function, call it with `mode' and return that value."
+  (when (elcord--test-match-p (car entry) mode)
+    (let ((mapping (cdr entry)))
+      (cl-typecase mapping
+        (string mapping)
+        (function (funcall mapping mode))))))
+
+(defun elcord--find-mode-entry (alist mode)
+  "Get the first entry in `ALIST' matching `MODE'.
+`alist' Should be an alist like `elcord-mode-icon-alist' where each value is
+ either a string,or a function of one argument `mode'.
+ If it is a function, it should return a string, or nil if no match."
+  (let ((cell alist)
+        (result nil))
+    (while cell
+      (setq result (elcord--entry-value (car cell) mode)
+            cell (if result nil (cdr cell))))
+    result))
+
 (defun elcord--mode-icon ()
   "Figure out what icon to use for the current major mode.
 If an icon is mapped by `elcord-mode-icon-alist', then that is used.
@@ -350,10 +410,9 @@ If no icon is available, use the default icon."
   (let ((mode major-mode)
         (ret elcord--editor-icon))
     (while mode
-      (if-let ((icon (assoc mode elcord-mode-icon-alist)))
-          (progn
-            (setq ret (cdr icon))
-            (setq mode nil))
+      (if-let ((icon (elcord--find-mode-entry elcord-mode-icon-alist mode)))
+          (setq ret icon
+                mode nil)
         (setq mode (get mode 'derived-mode-parent))))
     ret))
 
@@ -365,51 +424,60 @@ If no text is available, use the value of `mode-name'."
   (let ((mode major-mode)
         (ret mode-name))
     (while mode
-      (if-let ((text (assoc mode elcord-mode-text-alist)))
-          (progn
-            (setq ret (cdr text))
-            (setq mode nil))
+      (if-let ((text (elcord--find-mode-entry elcord-mode-text-alist mode)))
+          (setq ret text
+                mode nil)
         (setq mode (get mode 'derived-mode-parent))))
+    (unless (stringp ret)
+      (setq ret (format "%s" ret)))
     ret))
 
 (defun elcord--mode-icon-and-text ()
-  "Obtain the icon & text to use for the large/small icon, using current major mode.
-  ((\"large_text\" . <text>)
-   (\"large_image\" . <icon-name>)
-   (\"small_text\" . <text>)
-   (\"small_image\" . <icon-name>))"
+  "Obtain the icon & text to use for the current major mode.
+\((\"large_text\" . <text>)
+  (\"large_image\" . <icon-name>)
+  (\"small_text\" . <text>)
+  (\"small_image\" . <icon-name>))"
   (let ((text (elcord--mode-text))
         (icon (elcord--mode-icon))
-        large-text large-image small-text small-image)
+        large-text large-image
+        small-text small-image)
     (cond
      (elcord-use-major-mode-as-main-icon
       (setq large-text text
-            large-icon icon
+            large-image icon
             small-text elcord--editor-name
-            small-icon elcord--editor-icon))
+            small-image elcord--editor-icon))
      (t
       (setq large-text elcord--editor-name
-            large-icon elcord--editor-icon
+            large-image elcord--editor-icon
             small-text text
-            small-icon icon)))
-    (list
-     (cons "large_text" large-text)
-     (cons "large_image" large-icon)
-     (cons "small_text" small-text)
-     (cons "small_image" small-icon))))
+            small-image icon)))
+    (cond
+     (elcord-show-small-icon
+      (list
+       (cons "large_text" large-text)
+       (cons "large_image" large-image)
+       (cons "small_text" small-text)
+       (cons "small_image" small-image)))
+     (t
+      (list
+       (cons "large_text" large-text)
+       (cons "large_image" large-image)
+       (cons "small_text" small-text))))))
 
 (defun elcord--details-and-state ()
   "Obtain the details and state to use for Discord's Rich Presence."
   (let ((activity (if elcord-display-buffer-details
-                     (list
-                      (cons "details" (format "Editing %s" (buffer-name)))
-                      (cons "state" (format "Line %s (%s of %S)"
-                                            (format-mode-line "%l")
-                                            (format-mode-line "%l")
-                                            (+ 1 (count-lines (point-min) (point-max))))))
-                   (list
-                    (cons "details" "Editing")
-                    (cons "state" (elcord--mode-text))))))
+                      (list
+                       (cons "details" (format "Editing %s" (buffer-name)))
+                       (cons "state" (format "Line %s (%s of %S)"
+                                             (format-mode-line "%l")
+                                             (format-mode-line "%l")
+                                             (+ 1 (count-lines (point-min) (point-max))))))
+                    (list
+                     (cons "details" "Editing")
+                     (cons "state" (elcord--mode-text))))))
     (when elcord-display-elapsed
       (push (list "timestamps" (cons "start" elcord--startup-time)) activity))
     activity))
@@ -421,36 +489,72 @@ If no text is available, use the value of `mode-name'."
             ,@(elcord--details-and-state)))
          (nonce (format-time-string "%s%N"))
          (presence
-           `(("cmd" . "SET_ACTIVITY")
-             ("args" . (("activity" . ,activity)
-                        ("pid" . ,(emacs-pid))))
-             ("nonce" . ,nonce))))
+          `(("cmd" . "SET_ACTIVITY")
+            ("args" . (("activity" . ,activity)
+                       ("pid" . ,(emacs-pid))))
+            ("nonce" . ,nonce))))
     (elcord--send-packet 1 presence)))
 
+(defun elcord--buffer-boring-p (buffer-name)
+  "Return non-nil if `BUFFER-NAME' is non-boring per `ELCORD-BORING-BUFFERS-REGEXP-LIST'."
+  (let ((cell elcord-boring-buffers-regexp-list)
+        (result nil))
+    (while cell
+      (if (string-match-p (car cell) buffer-name)
+          (setq result t
+                cell nil)
+        (setq cell (cdr cell))))
+    result))
+
+(defun elcord--find-non-boring-window ()
+  "Try to find a live window displaying a non-boring buffer."
+  (let ((cell (window-list))
+        (result nil))
+    (while cell
+      (let ((window (car cell)))
+        (if (not (elcord--buffer-boring-p (buffer-name (window-buffer window))))
+            (setq result window
+                  cell nil)
+          (setq cell (cdr cell)))))
+    result))
+
+(defun elcord--try-update-presence (new-buffer-name new-buffer-position)
+  "Try updating presence with `NEW-BUFFER-NAME' and `NEW-BUFFER-POSITION' while handling errors and disconnections."
+  (setq elcord--last-known-buffer-name new-buffer-name
+        elcord--last-known-position new-buffer-position)
+  (condition-case nil
+      ;;Try and set the presence
+      (elcord--set-presence)
+    (error
+     ;;If we hit an error, cancel updates
+     (elcord--cancel-updates)
+     ;; Disconnect
+     (elcord--disconnect)
+     ;; and try reconnecting
+     (elcord--start-reconnect))))
+
 (defun elcord--update-presence ()
-  "Check if we changed our current line..."
-  (when (and
-         (not (window-minibuffer-p))
-         (or (not (= (count-lines (point-min) (point))
-                     elcord--last-known-position))
-             (not (string= (buffer-name) elcord--last-known-buffer-name))))
-    (setq elcord--last-known-buffer-name (buffer-name))
-    (setq elcord--last-known-position (count-lines (point-min) (point)))
-    (condition-case nil
-        ;;Try and set the presence
-        (elcord--set-presence)
-      (error
-       ;;If we hit an error, cancel updates
-       (elcord--cancel-updates)
-       ;; and try reconnecting
-       (elcord--start-reconnect)))))
+  "Conditionally update presence by testing the current buffer/line.
+If there is no 'previous' buffer attempt to find a non-boring buffer to initialize to."
+  (if (= elcord--last-known-position -1)
+      (when-let ((window (elcord--find-non-boring-window)))
+        (with-current-buffer (window-buffer window)
+          (elcord--try-update-presence (buffer-name) (count-lines (point-min) (point)))))
+    (let ((new-buffer-name (buffer-name (current-buffer))))
+      (unless (elcord--buffer-boring-p new-buffer-name)
+        (let ((new-buffer-position (count-lines (point-min) (point))))
+          (unless (and (string= new-buffer-name elcord--last-known-buffer-name)
+                       (= new-buffer-position elcord--last-known-position))
+            (elcord--try-update-presence new-buffer-name new-buffer-position)))))))
 
 (defun elcord--start-updates ()
   "Start sending periodic update to Discord Rich Presence."
   (unless elcord--update-presence-timer
     (message "elcord: connected. starting updates")
     ;;Start sending updates now that we've heard from discord
-    (setq elcord--update-presence-timer (run-at-time 0 15 'elcord--update-presence))))
+    (setq elcord--last-known-position -1
+          elcord--last-known-buffer-name ""
+          elcord--update-presence-timer (run-at-time 0 elcord-refresh-rate 'elcord--update-presence))))
 
 (defun elcord--cancel-updates ()
   "Stop sending periodic update to Discord Rich Presence."
